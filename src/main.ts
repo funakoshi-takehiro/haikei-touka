@@ -481,7 +481,8 @@ editorApplyBtn.addEventListener("click", async () => {
     closeEditor();
   } catch (err) {
     console.error(err);
-    alert("再処理に失敗しました / Re-processing failed");
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    alert(`再処理に失敗しました / Re-processing failed\n\n${detail}`);
     setEditorBusy(false);
   }
 });
