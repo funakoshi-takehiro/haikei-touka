@@ -1,0 +1,18 @@
+{
+  "name": "haikei-touka",
+  "version": "1.0.0",
+  "description": "ブラウザ内で完結する画像の背景透過ツール / In-browser background removal tool",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@imgly/background-removal": "^1.5.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vite": "^5.4.2"
+  }
+}
