@@ -20,6 +20,14 @@ const ja: Dict = {
   download: "ダウンロード",
   summary: "{done}/{total} 完了",
   loadingModel: "AIモデルを読み込み中…（初回のみ）",
+  edit: "編集",
+  editTitle: "手動で修正",
+  editHint: "「消す」で透明化、「残す」で元画像から復元します。",
+  modeErase: "消す",
+  modeKeep: "残す",
+  brushSize: "ブラシ",
+  applyEdit: "適用",
+  cancel: "キャンセル",
 };
 
 const en: Dict = {
@@ -40,6 +48,14 @@ const en: Dict = {
   download: "Download",
   summary: "{done}/{total} done",
   loadingModel: "Loading AI model… (first time only)",
+  edit: "Edit",
+  editTitle: "Manual touch-up",
+  editHint: "“Erase” to make transparent, “Keep” to restore from the original.",
+  modeErase: "Erase",
+  modeKeep: "Keep",
+  brushSize: "Brush",
+  applyEdit: "Apply",
+  cancel: "Cancel",
 };
 
 const dicts: Record<Lang, Dict> = { ja, en };

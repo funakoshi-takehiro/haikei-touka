@@ -78,6 +78,37 @@
       <span data-i18n="poweredBy">ブラウザ内AI処理 · @imgly/background-removal</span>
     </footer>
 
+    <!-- 編集モーダル -->
+    <div id="editor" class="editor-modal" hidden>
+      <div class="editor-dialog">
+        <header class="editor-head">
+          <div>
+            <span class="editor-title" data-i18n="editTitle">手動で修正</span>
+            <span class="editor-hint" data-i18n="editHint"
+              >「消す」で透明化、「残す」で元画像から復元します。</span
+            >
+          </div>
+          <button id="editor-close" class="btn btn-ghost" data-i18n="cancel">キャンセル</button>
+        </header>
+        <div class="editor-canvas-wrap">
+          <canvas id="editor-canvas"></canvas>
+        </div>
+        <div class="editor-tools">
+          <div class="seg" role="group">
+            <button id="mode-erase" class="seg-btn is-active" data-i18n="modeErase">消す</button>
+            <button id="mode-keep" class="seg-btn" data-i18n="modeKeep">残す</button>
+          </div>
+          <label class="field">
+            <span data-i18n="brushSize">ブラシ</span>
+            <input id="brush-size" type="range" min="6" max="140" value="40" />
+          </label>
+          <span class="editor-tools-spacer"></span>
+          <button id="editor-reset" class="btn" data-i18n="reset">リセット</button>
+          <button id="editor-apply" class="btn btn-primary" data-i18n="applyEdit">適用</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 隠しファイル入力 -->
     <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
     <input id="dir-input" type="file" accept="image/png,image/jpeg,image/webp" multiple webkitdirectory hidden />

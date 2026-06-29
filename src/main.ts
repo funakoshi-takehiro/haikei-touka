@@ -16,6 +16,7 @@ interface Item {
   imgEl: HTMLImageElement;
   overlayEl: HTMLElement;
   dlBtn: HTMLButtonElement;
+  editBtn: HTMLButtonElement;
 }
 
 const ACCEPT = ["image/png", "image/jpeg", "image/webp"];
@@ -137,11 +138,19 @@ function createItem(file: File): Item {
   nameEl.className = "card-name";
   nameEl.textContent = file.name;
 
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
+
+  const editBtn = document.createElement("button");
+  editBtn.className = "btn card-dl";
+  editBtn.disabled = true;
+
   const dlBtn = document.createElement("button");
   dlBtn.className = "btn btn-primary card-dl";
   dlBtn.disabled = true;
 
-  body.append(nameEl, dlBtn);
+  actions.append(editBtn, dlBtn);
+  body.append(nameEl, actions);
   card.append(preview, body);
   grid.appendChild(card);
 
@@ -154,9 +163,11 @@ function createItem(file: File): Item {
     imgEl,
     overlayEl,
     dlBtn,
+    editBtn,
   };
 
   dlBtn.addEventListener("click", () => downloadItem(item));
+  editBtn.addEventListener("click", () => openEditor(item));
   setStatus(item, "waiting");
   return item;
 }
@@ -255,16 +266,19 @@ function setStatus(item: Item, status: Status) {
   overlay.classList.remove("is-error");
   overlay.innerHTML = "";
 
+  item.dlBtn.textContent = t("download");
+  item.editBtn.textContent = t("edit");
+
   if (status === "done") {
     overlay.style.display = "none";
     item.dlBtn.disabled = false;
-    item.dlBtn.textContent = t("download");
+    item.editBtn.disabled = false;
     return;
   }
 
   overlay.style.display = "flex";
   item.dlBtn.disabled = true;
-  item.dlBtn.textContent = t("download");
+  item.editBtn.disabled = true;
 
   if (status === "processing") {
     const sp = document.createElement("div");
@@ -295,6 +309,172 @@ function refreshDynamicText() {
   // 言語切替時、各カードのステータス文言も更新
   for (const item of items) setStatus(item, item.status);
 }
+
+// ============ 編集（手動修正）モーダル ============
+const editorModal = document.getElementById("editor")!;
+const editorCanvas = document.getElementById("editor-canvas") as HTMLCanvasElement;
+const editorCloseBtn = document.getElementById("editor-close") as HTMLButtonElement;
+const editorApplyBtn = document.getElementById("editor-apply") as HTMLButtonElement;
+const editorResetBtn = document.getElementById("editor-reset") as HTMLButtonElement;
+const modeEraseBtn = document.getElementById("mode-erase") as HTMLButtonElement;
+const modeKeepBtn = document.getElementById("mode-keep") as HTMLButtonElement;
+const brushSizeInput = document.getElementById("brush-size") as HTMLInputElement;
+
+type BrushMode = "erase" | "keep";
+
+let editTarget: Item | null = null;
+let originalBmp: ImageBitmap | null = null;
+let maskCanvas: HTMLCanvasElement | null = null; // 不透明=残す / 透明=消す
+let editCtx: CanvasRenderingContext2D | null = null;
+let maskCtx: CanvasRenderingContext2D | null = null;
+let brushMode: BrushMode = "erase";
+let drawing = false;
+let lastPt: { x: number; y: number } | null = null;
+
+async function openEditor(item: Item) {
+  if (!item.resultBlob) return;
+  editTarget = item;
+
+  // 現在の結果(=マスク)と元画像を読み込む
+  const maskBmp = await createImageBitmap(item.resultBlob);
+  const w = maskBmp.width;
+  const h = maskBmp.height;
+  originalBmp = await createImageBitmap(item.file);
+
+  editorCanvas.width = w;
+  editorCanvas.height = h;
+  editCtx = editorCanvas.getContext("2d")!;
+
+  maskCanvas = document.createElement("canvas");
+  maskCanvas.width = w;
+  maskCanvas.height = h;
+  maskCtx = maskCanvas.getContext("2d")!;
+  maskCtx.drawImage(maskBmp, 0, 0); // 初期マスク = AI結果のアルファ
+  maskBmp.close();
+
+  setBrushMode("erase");
+  compose();
+  editorModal.hidden = false;
+}
+
+function closeEditor() {
+  editorModal.hidden = true;
+  originalBmp?.close();
+  originalBmp = null;
+  maskCanvas = null;
+  maskCtx = null;
+  editCtx = null;
+  editTarget = null;
+  lastPt = null;
+  drawing = false;
+}
+
+function setBrushMode(mode: BrushMode) {
+  brushMode = mode;
+  modeEraseBtn.classList.toggle("is-active", mode === "erase");
+  modeKeepBtn.classList.toggle("is-active", mode === "keep");
+}
+
+/** マスクを元画像に適用して表示用キャンバスへ描画 */
+function compose() {
+  if (!editCtx || !originalBmp || !maskCanvas) return;
+  const { width: w, height: h } = editorCanvas;
+  editCtx.globalCompositeOperation = "source-over";
+  editCtx.clearRect(0, 0, w, h);
+  editCtx.drawImage(originalBmp, 0, 0, w, h);
+  editCtx.globalCompositeOperation = "destination-in";
+  editCtx.drawImage(maskCanvas, 0, 0);
+  editCtx.globalCompositeOperation = "source-over";
+}
+
+/** 表示座標 → キャンバス座標 */
+function toCanvasPt(e: PointerEvent): { x: number; y: number } {
+  const rect = editorCanvas.getBoundingClientRect();
+  const sx = editorCanvas.width / rect.width;
+  const sy = editorCanvas.height / rect.height;
+  return { x: (e.clientX - rect.left) * sx, y: (e.clientY - rect.top) * sy };
+}
+
+/** スライダー値(画面px) → キャンバスpx のブラシ径 */
+function brushWidthCanvasPx(): number {
+  const rect = editorCanvas.getBoundingClientRect();
+  const scale = editorCanvas.width / rect.width;
+  return Number(brushSizeInput.value) * scale;
+}
+
+function stroke(from: { x: number; y: number }, to: { x: number; y: number }) {
+  if (!maskCtx) return;
+  maskCtx.lineCap = "round";
+  maskCtx.lineJoin = "round";
+  maskCtx.lineWidth = brushWidthCanvasPx();
+  if (brushMode === "erase") {
+    maskCtx.globalCompositeOperation = "destination-out";
+    maskCtx.strokeStyle = "rgba(0,0,0,1)";
+  } else {
+    maskCtx.globalCompositeOperation = "source-over";
+    maskCtx.strokeStyle = "#ffffff";
+  }
+  maskCtx.beginPath();
+  maskCtx.moveTo(from.x, from.y);
+  maskCtx.lineTo(to.x, to.y);
+  maskCtx.stroke();
+  maskCtx.globalCompositeOperation = "source-over";
+  compose();
+}
+
+editorCanvas.addEventListener("pointerdown", (e) => {
+  if (!maskCtx) return;
+  drawing = true;
+  editorCanvas.setPointerCapture(e.pointerId);
+  const p = toCanvasPt(e);
+  lastPt = p;
+  stroke(p, p);
+});
+editorCanvas.addEventListener("pointermove", (e) => {
+  if (!drawing || !lastPt) return;
+  const p = toCanvasPt(e);
+  stroke(lastPt, p);
+  lastPt = p;
+});
+function endStroke() {
+  drawing = false;
+  lastPt = null;
+}
+editorCanvas.addEventListener("pointerup", endStroke);
+editorCanvas.addEventListener("pointercancel", endStroke);
+
+modeEraseBtn.addEventListener("click", () => setBrushMode("erase"));
+modeKeepBtn.addEventListener("click", () => setBrushMode("keep"));
+editorCloseBtn.addEventListener("click", closeEditor);
+editorModal.addEventListener("click", (e) => {
+  if (e.target === editorModal) closeEditor();
+});
+
+editorResetBtn.addEventListener("click", async () => {
+  if (!editTarget?.resultBlob || !maskCtx || !maskCanvas) return;
+  const maskBmp = await createImageBitmap(editTarget.resultBlob);
+  maskCtx.globalCompositeOperation = "source-over";
+  maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+  maskCtx.drawImage(maskBmp, 0, 0);
+  maskBmp.close();
+  compose();
+});
+
+editorApplyBtn.addEventListener("click", () => {
+  if (!editTarget) return;
+  const item = editTarget;
+  editorCanvas.toBlob(
+    (blob) => {
+      if (!blob) return;
+      if (item.resultUrl) URL.revokeObjectURL(item.resultUrl);
+      item.resultBlob = blob;
+      item.resultUrl = URL.createObjectURL(blob);
+      item.imgEl.src = item.resultUrl;
+      closeEditor();
+    },
+    currentFormat(),
+  );
+});
 
 // 初期翻訳適用
 applyStaticTranslations();
