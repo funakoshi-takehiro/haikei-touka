@@ -463,9 +463,10 @@ editorResetBtn.addEventListener("click", () => {
 editorApplyBtn.addEventListener("click", async () => {
   if (!editTarget || !originalBmp || !priorCanvas || !scribbleCanvas) return;
   const item = editTarget;
-  setEditorBusy(true, t("loadingEngine"));
+  setEditorBusy(true, t("reprocessing"));
   try {
-    const out = await grabCutRefine(originalBmp, priorCanvas, scribbleCanvas);
+    await new Promise((r) => setTimeout(r, 16)); // スピナー描画の猶予
+    const out = scribbleRefine(originalBmp, priorCanvas, scribbleCanvas);
     await new Promise<void>((resolve) =>
       out.toBlob((blob) => {
         if (blob) {
@@ -490,45 +491,21 @@ function setEditorBusy(busy: boolean, text = "") {
   editorBusyText.textContent = text;
 }
 
-// ---- OpenCV.js の遅延ロード ----
-let cvReady: Promise<any> | null = null;
-function loadOpenCV(): Promise<any> {
-  const w = window as any;
-  if (w.cv && w.cv.Mat) return Promise.resolve(w.cv);
-  if (cvReady) return cvReady;
-  cvReady = new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = "https://docs.opencv.org/4.10.0/opencv.js";
-    script.async = true;
-    script.onload = () => {
-      const cv = w.cv;
-      if (cv && cv.Mat) resolve(cv);
-      else if (cv) cv.onRuntimeInitialized = () => resolve(w.cv);
-      else reject(new Error("opencv load failed"));
-    };
-    script.onerror = () => reject(new Error("opencv fetch failed"));
-    document.head.appendChild(script);
-  });
-  return cvReady;
-}
+const GROW_TOLERANCE = 60; // 近傍色差(L1)の許容。大きいほど領域が広がる
 
 /**
- * AI結果を初期マスク、ブラシ線を確定前景/背景の制約として GrabCut を実行し、
- * 透過済みの結果キャンバスを返す。
+ * ブラシ線をシードに、元画像の色が連続する領域だけを前景/背景へ伸ばして
+ * （エッジで止まる領域成長）背景透過をやり直し、透過済みキャンバスを返す。
+ * AI結果は「線が届かなかった領域」の初期値として踏襲する。
  */
-async function grabCutRefine(
+function scribbleRefine(
   original: ImageBitmap,
   prior: HTMLCanvasElement,
   scribble: HTMLCanvasElement,
-): Promise<HTMLCanvasElement> {
-  const cv = await loadOpenCV();
-  setEditorBusy(true, t("reprocessing"));
-  // UIへ反映する猶予
-  await new Promise((r) => setTimeout(r, 16));
-
+): HTMLCanvasElement {
   const fullW = original.width;
   const fullH = original.height;
-  const maxDim = 900; // 処理は縮小して高速化、マスクは後で拡大
+  const maxDim = 1000; // 処理は縮小して高速化、マスクは後で拡大
   const scale = Math.min(1, maxDim / Math.max(fullW, fullH));
   const w = Math.max(1, Math.round(fullW * scale));
   const h = Math.max(1, Math.round(fullH * scale));
@@ -536,64 +513,86 @@ async function grabCutRefine(
   const tmp = document.createElement("canvas");
   tmp.width = w;
   tmp.height = h;
-  const tctx = tmp.getContext("2d")!;
+  const tctx = tmp.getContext("2d", { willReadFrequently: true })!;
 
   tctx.clearRect(0, 0, w, h);
   tctx.drawImage(original, 0, 0, w, h);
-  const imgData = tctx.getImageData(0, 0, w, h);
+  const img = tctx.getImageData(0, 0, w, h).data;
 
   tctx.clearRect(0, 0, w, h);
   tctx.drawImage(prior, 0, 0, w, h);
-  const priorData = tctx.getImageData(0, 0, w, h).data;
+  const pri = tctx.getImageData(0, 0, w, h).data;
 
   tctx.clearRect(0, 0, w, h);
   tctx.drawImage(scribble, 0, 0, w, h);
-  const scrData = tctx.getImageData(0, 0, w, h).data;
+  const scr = tctx.getImageData(0, 0, w, h).data;
 
-  const src = cv.matFromImageData(imgData);
-  const rgb = new cv.Mat();
-  cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
-
-  const mask = new cv.Mat(h, w, cv.CV_8UC1);
-  for (let i = 0; i < w * h; i++) {
-    const a = priorData[i * 4 + 3];
-    let v = a > 128 ? cv.GC_PR_FGD : cv.GC_PR_BGD;
-    const r = scrData[i * 4];
-    const g = scrData[i * 4 + 1];
-    const sa = scrData[i * 4 + 3];
-    if (sa > 40) {
-      if (g > 120 && r < 110) v = cv.GC_FGD; // 緑=確定前景
-      else if (r > 120 && g < 110) v = cv.GC_BGD; // 赤=確定背景
+  const n = w * h;
+  const label = new Int8Array(n); // 0=未確定, 1=前景, 2=背景
+  const queue = new Int32Array(n);
+  let qh = 0;
+  let qt = 0;
+  for (let i = 0; i < n; i++) {
+    const a = scr[i * 4 + 3];
+    if (a <= 40) continue;
+    const r = scr[i * 4];
+    const g = scr[i * 4 + 1];
+    if (g > 120 && r < 110) {
+      label[i] = 1; // 緑=前景
+      queue[qt++] = i;
+    } else if (r > 120 && g < 110) {
+      label[i] = 2; // 赤=背景
+      queue[qt++] = i;
     }
-    mask.data[i] = v;
   }
 
-  const bgd = new cv.Mat();
-  const fgd = new cv.Mat();
-  const rect = new cv.Rect(0, 0, w, h);
-  cv.grabCut(rgb, mask, rect, bgd, fgd, 3, cv.GC_INIT_WITH_MASK);
+  // 多シード幅優先で、隣接ピクセル同士の色差が許容内の間だけ伝播
+  const neighborOffsets = [-1, 1, -w, w];
+  while (qh < qt) {
+    const i = queue[qh++];
+    const lab = label[i];
+    const x = i % w;
+    const y = (i / w) | 0;
+    const ir = img[i * 4];
+    const ig = img[i * 4 + 1];
+    const ib = img[i * 4 + 2];
+    for (let k = 0; k < 4; k++) {
+      // 画像の端を越える方向はスキップ
+      if (k === 0 && x === 0) continue;
+      if (k === 1 && x === w - 1) continue;
+      if (k === 2 && y === 0) continue;
+      if (k === 3 && y === h - 1) continue;
+      const j = i + neighborOffsets[k];
+      if (label[j]) continue;
+      const d =
+        Math.abs(img[j * 4] - ir) +
+        Math.abs(img[j * 4 + 1] - ig) +
+        Math.abs(img[j * 4 + 2] - ib);
+      if (d <= GROW_TOLERANCE) {
+        label[j] = lab;
+        queue[qt++] = j;
+      }
+    }
+  }
 
-  const alpha = new Uint8ClampedArray(w * h * 4);
-  for (let i = 0; i < w * h; i++) {
-    const m = mask.data[i];
-    const fg = m === cv.GC_FGD || m === cv.GC_PR_FGD;
+  const alpha = new Uint8ClampedArray(n * 4);
+  for (let i = 0; i < n; i++) {
+    let a: number;
+    if (label[i] === 1) a = 255;
+    else if (label[i] === 2) a = 0;
+    else a = pri[i * 4 + 3] > 128 ? 255 : 0; // 未確定はAI結果を踏襲
     alpha[i * 4] = 255;
     alpha[i * 4 + 1] = 255;
     alpha[i * 4 + 2] = 255;
-    alpha[i * 4 + 3] = fg ? 255 : 0;
+    alpha[i * 4 + 3] = a;
   }
-  src.delete();
-  rgb.delete();
-  mask.delete();
-  bgd.delete();
-  fgd.delete();
 
   const maskSmall = document.createElement("canvas");
   maskSmall.width = w;
   maskSmall.height = h;
   maskSmall.getContext("2d")!.putImageData(new ImageData(alpha, w, h), 0, 0);
 
-  // 元解像度で合成（マスクは滑らかに拡大）
+  // 元解像度で合成（マスクは滑らかに拡大して境界をなじませる）
   const out = document.createElement("canvas");
   out.width = fullW;
   out.height = fullH;
