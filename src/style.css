@@ -17,6 +17,11 @@
   box-sizing: border-box;
 }
 
+/* hidden 属性を常に最優先で効かせる（.toolbar 等の display:flex に負けないように） */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -311,6 +316,7 @@ body {
   position: fixed;
   inset: 0;
   z-index: 50;
+  pointer-events: none; /* 表示中でも下の操作を妨げない */
   display: flex;
   align-items: center;
   justify-content: center;

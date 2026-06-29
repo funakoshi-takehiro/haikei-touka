@@ -67,23 +67,30 @@ dirInput.addEventListener("change", () => {
 });
 
 // ============ ドラッグ＆ドロップ ============
-let dragDepth = 0;
-window.addEventListener("dragenter", (e) => {
+// dragover が連続発火する性質を使い、止まったらタイマーで自動的に隠す。
+// enter/leave のカウント方式は取りこぼしで表示が固まりやすいため使わない。
+let dragHideTimer: number | undefined;
+
+function isFileDrag(e: DragEvent): boolean {
+  return !!e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files");
+}
+
+window.addEventListener("dragover", (e) => {
+  if (!isFileDrag(e)) return;
   e.preventDefault();
-  dragDepth++;
   dropOverlay.hidden = false;
-});
-window.addEventListener("dragover", (e) => e.preventDefault());
-window.addEventListener("dragleave", (e) => {
-  e.preventDefault();
-  dragDepth = Math.max(0, dragDepth - 1);
-  if (dragDepth === 0) dropOverlay.hidden = true;
+  if (dragHideTimer) clearTimeout(dragHideTimer);
+  dragHideTimer = window.setTimeout(() => (dropOverlay.hidden = true), 120);
 });
 window.addEventListener("drop", (e) => {
   e.preventDefault();
-  dragDepth = 0;
+  if (dragHideTimer) clearTimeout(dragHideTimer);
   dropOverlay.hidden = true;
   if (e.dataTransfer?.files) addFiles(e.dataTransfer.files);
+});
+window.addEventListener("dragend", () => {
+  if (dragHideTimer) clearTimeout(dragHideTimer);
+  dropOverlay.hidden = true;
 });
 
 // ============ ファイル追加 ============
