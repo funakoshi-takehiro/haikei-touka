@@ -21,13 +21,15 @@ const ja: Dict = {
   summary: "{done}/{total} 完了",
   loadingModel: "AIモデルを読み込み中…（初回のみ）",
   edit: "編集",
-  editTitle: "手動で修正",
-  editHint: "「消す」で透明化、「残す」で元画像から復元します。",
-  modeErase: "消す",
-  modeKeep: "残す",
+  editTitle: "ブラシで指定して再処理",
+  editHint: "残す部分・消す部分をブラシでなぞり、「適用」で背景透過をやり直します。",
+  modeErase: "消す（背景）",
+  modeKeep: "残す（前景）",
   brushSize: "ブラシ",
-  applyEdit: "適用",
+  applyEdit: "適用して再処理",
   cancel: "キャンセル",
+  reprocessing: "再処理中…",
+  loadingEngine: "処理エンジンを読み込み中…（初回のみ）",
 };
 
 const en: Dict = {
@@ -49,13 +51,15 @@ const en: Dict = {
   summary: "{done}/{total} done",
   loadingModel: "Loading AI model… (first time only)",
   edit: "Edit",
-  editTitle: "Manual touch-up",
-  editHint: "“Erase” to make transparent, “Keep” to restore from the original.",
-  modeErase: "Erase",
-  modeKeep: "Keep",
+  editTitle: "Mark with brush & re-run",
+  editHint: "Brush the areas to keep / remove, then Apply to re-run background removal.",
+  modeErase: "Erase (bg)",
+  modeKeep: "Keep (fg)",
   brushSize: "Brush",
-  applyEdit: "Apply",
+  applyEdit: "Apply & re-run",
   cancel: "Cancel",
+  reprocessing: "Re-processing…",
+  loadingEngine: "Loading engine… (first time only)",
 };
 
 const dicts: Record<Lang, Dict> = { ja, en };

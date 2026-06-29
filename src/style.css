@@ -375,6 +375,7 @@ body {
 }
 
 .editor-canvas-wrap {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -442,6 +443,20 @@ body {
   display: flex;
   gap: 6px;
   flex: none;
+}
+
+.editor-busy {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.82);
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--primary-dark);
 }
 
 /* ---- Footer ---- */

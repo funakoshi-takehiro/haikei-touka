@@ -310,7 +310,7 @@ function refreshDynamicText() {
   for (const item of items) setStatus(item, item.status);
 }
 
-// ============ 編集（手動修正）モーダル ============
+// ============ 編集モーダル（ブラシヒント → GrabCut で再処理） ============
 const editorModal = document.getElementById("editor")!;
 const editorCanvas = document.getElementById("editor-canvas") as HTMLCanvasElement;
 const editorCloseBtn = document.getElementById("editor-close") as HTMLButtonElement;
@@ -319,15 +319,22 @@ const editorResetBtn = document.getElementById("editor-reset") as HTMLButtonElem
 const modeEraseBtn = document.getElementById("mode-erase") as HTMLButtonElement;
 const modeKeepBtn = document.getElementById("mode-keep") as HTMLButtonElement;
 const brushSizeInput = document.getElementById("brush-size") as HTMLInputElement;
+const editorBusy = document.getElementById("editor-busy")!;
+const editorBusyText = document.getElementById("editor-busy-text")!;
+
+// ブラシ色（GrabCutヒントの判定に使う）: 緑=残す(前景)、赤=消す(背景)
+const KEEP_COLOR = "rgba(0,200,0,1)";
+const ERASE_COLOR = "rgba(224,0,0,1)";
 
 type BrushMode = "erase" | "keep";
 
 let editTarget: Item | null = null;
-let originalBmp: ImageBitmap | null = null;
-let maskCanvas: HTMLCanvasElement | null = null; // 不透明=残す / 透明=消す
+let originalBmp: ImageBitmap | null = null; // 元画像
+let priorCanvas: HTMLCanvasElement | null = null; // AI結果（推定前景/背景の初期マスク）
+let scribbleCanvas: HTMLCanvasElement | null = null; // ユーザーのヒント線（緑/赤）
+let scribbleCtx: CanvasRenderingContext2D | null = null;
 let editCtx: CanvasRenderingContext2D | null = null;
-let maskCtx: CanvasRenderingContext2D | null = null;
-let brushMode: BrushMode = "erase";
+let brushMode: BrushMode = "keep";
 let drawing = false;
 let lastPt: { x: number; y: number } | null = null;
 
@@ -335,34 +342,39 @@ async function openEditor(item: Item) {
   if (!item.resultBlob) return;
   editTarget = item;
 
-  // 現在の結果(=マスク)と元画像を読み込む
-  const maskBmp = await createImageBitmap(item.resultBlob);
-  const w = maskBmp.width;
-  const h = maskBmp.height;
+  const priorBmp = await createImageBitmap(item.resultBlob);
+  const w = priorBmp.width;
+  const h = priorBmp.height;
   originalBmp = await createImageBitmap(item.file);
 
   editorCanvas.width = w;
   editorCanvas.height = h;
   editCtx = editorCanvas.getContext("2d")!;
 
-  maskCanvas = document.createElement("canvas");
-  maskCanvas.width = w;
-  maskCanvas.height = h;
-  maskCtx = maskCanvas.getContext("2d")!;
-  maskCtx.drawImage(maskBmp, 0, 0); // 初期マスク = AI結果のアルファ
-  maskBmp.close();
+  priorCanvas = document.createElement("canvas");
+  priorCanvas.width = w;
+  priorCanvas.height = h;
+  priorCanvas.getContext("2d")!.drawImage(priorBmp, 0, 0);
+  priorBmp.close();
 
-  setBrushMode("erase");
+  scribbleCanvas = document.createElement("canvas");
+  scribbleCanvas.width = w;
+  scribbleCanvas.height = h;
+  scribbleCtx = scribbleCanvas.getContext("2d")!;
+
+  setBrushMode("keep");
   compose();
   editorModal.hidden = false;
 }
 
 function closeEditor() {
   editorModal.hidden = true;
+  editorBusy.hidden = true;
   originalBmp?.close();
   originalBmp = null;
-  maskCanvas = null;
-  maskCtx = null;
+  priorCanvas = null;
+  scribbleCanvas = null;
+  scribbleCtx = null;
   editCtx = null;
   editTarget = null;
   lastPt = null;
@@ -375,19 +387,18 @@ function setBrushMode(mode: BrushMode) {
   modeKeepBtn.classList.toggle("is-active", mode === "keep");
 }
 
-/** マスクを元画像に適用して表示用キャンバスへ描画 */
+/** 元画像 + ヒント線（半透明）を表示用キャンバスへ描画 */
 function compose() {
-  if (!editCtx || !originalBmp || !maskCanvas) return;
+  if (!editCtx || !originalBmp || !scribbleCanvas) return;
   const { width: w, height: h } = editorCanvas;
-  editCtx.globalCompositeOperation = "source-over";
+  editCtx.globalAlpha = 1;
   editCtx.clearRect(0, 0, w, h);
   editCtx.drawImage(originalBmp, 0, 0, w, h);
-  editCtx.globalCompositeOperation = "destination-in";
-  editCtx.drawImage(maskCanvas, 0, 0);
-  editCtx.globalCompositeOperation = "source-over";
+  editCtx.globalAlpha = 0.5;
+  editCtx.drawImage(scribbleCanvas, 0, 0);
+  editCtx.globalAlpha = 1;
 }
 
-/** 表示座標 → キャンバス座標 */
 function toCanvasPt(e: PointerEvent): { x: number; y: number } {
   const rect = editorCanvas.getBoundingClientRect();
   const sx = editorCanvas.width / rect.width;
@@ -395,7 +406,6 @@ function toCanvasPt(e: PointerEvent): { x: number; y: number } {
   return { x: (e.clientX - rect.left) * sx, y: (e.clientY - rect.top) * sy };
 }
 
-/** スライダー値(画面px) → キャンバスpx のブラシ径 */
 function brushWidthCanvasPx(): number {
   const rect = editorCanvas.getBoundingClientRect();
   const scale = editorCanvas.width / rect.width;
@@ -403,27 +413,21 @@ function brushWidthCanvasPx(): number {
 }
 
 function stroke(from: { x: number; y: number }, to: { x: number; y: number }) {
-  if (!maskCtx) return;
-  maskCtx.lineCap = "round";
-  maskCtx.lineJoin = "round";
-  maskCtx.lineWidth = brushWidthCanvasPx();
-  if (brushMode === "erase") {
-    maskCtx.globalCompositeOperation = "destination-out";
-    maskCtx.strokeStyle = "rgba(0,0,0,1)";
-  } else {
-    maskCtx.globalCompositeOperation = "source-over";
-    maskCtx.strokeStyle = "#ffffff";
-  }
-  maskCtx.beginPath();
-  maskCtx.moveTo(from.x, from.y);
-  maskCtx.lineTo(to.x, to.y);
-  maskCtx.stroke();
-  maskCtx.globalCompositeOperation = "source-over";
+  if (!scribbleCtx) return;
+  scribbleCtx.globalCompositeOperation = "source-over";
+  scribbleCtx.lineCap = "round";
+  scribbleCtx.lineJoin = "round";
+  scribbleCtx.lineWidth = brushWidthCanvasPx();
+  scribbleCtx.strokeStyle = brushMode === "keep" ? KEEP_COLOR : ERASE_COLOR;
+  scribbleCtx.beginPath();
+  scribbleCtx.moveTo(from.x, from.y);
+  scribbleCtx.lineTo(to.x, to.y);
+  scribbleCtx.stroke();
   compose();
 }
 
 editorCanvas.addEventListener("pointerdown", (e) => {
-  if (!maskCtx) return;
+  if (!scribbleCtx || !editorBusy.hidden) return;
   drawing = true;
   editorCanvas.setPointerCapture(e.pointerId);
   const p = toCanvasPt(e);
@@ -450,31 +454,157 @@ editorModal.addEventListener("click", (e) => {
   if (e.target === editorModal) closeEditor();
 });
 
-editorResetBtn.addEventListener("click", async () => {
-  if (!editTarget?.resultBlob || !maskCtx || !maskCanvas) return;
-  const maskBmp = await createImageBitmap(editTarget.resultBlob);
-  maskCtx.globalCompositeOperation = "source-over";
-  maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
-  maskCtx.drawImage(maskBmp, 0, 0);
-  maskBmp.close();
+editorResetBtn.addEventListener("click", () => {
+  if (!scribbleCtx || !scribbleCanvas) return;
+  scribbleCtx.clearRect(0, 0, scribbleCanvas.width, scribbleCanvas.height);
   compose();
 });
 
-editorApplyBtn.addEventListener("click", () => {
-  if (!editTarget) return;
+editorApplyBtn.addEventListener("click", async () => {
+  if (!editTarget || !originalBmp || !priorCanvas || !scribbleCanvas) return;
   const item = editTarget;
-  editorCanvas.toBlob(
-    (blob) => {
-      if (!blob) return;
-      if (item.resultUrl) URL.revokeObjectURL(item.resultUrl);
-      item.resultBlob = blob;
-      item.resultUrl = URL.createObjectURL(blob);
-      item.imgEl.src = item.resultUrl;
-      closeEditor();
-    },
-    currentFormat(),
-  );
+  setEditorBusy(true, t("loadingEngine"));
+  try {
+    const out = await grabCutRefine(originalBmp, priorCanvas, scribbleCanvas);
+    await new Promise<void>((resolve) =>
+      out.toBlob((blob) => {
+        if (blob) {
+          if (item.resultUrl) URL.revokeObjectURL(item.resultUrl);
+          item.resultBlob = blob;
+          item.resultUrl = URL.createObjectURL(blob);
+          item.imgEl.src = item.resultUrl;
+        }
+        resolve();
+      }, currentFormat()),
+    );
+    closeEditor();
+  } catch (err) {
+    console.error(err);
+    alert("再処理に失敗しました / Re-processing failed");
+    setEditorBusy(false);
+  }
 });
+
+function setEditorBusy(busy: boolean, text = "") {
+  editorBusy.hidden = !busy;
+  editorBusyText.textContent = text;
+}
+
+// ---- OpenCV.js の遅延ロード ----
+let cvReady: Promise<any> | null = null;
+function loadOpenCV(): Promise<any> {
+  const w = window as any;
+  if (w.cv && w.cv.Mat) return Promise.resolve(w.cv);
+  if (cvReady) return cvReady;
+  cvReady = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://docs.opencv.org/4.10.0/opencv.js";
+    script.async = true;
+    script.onload = () => {
+      const cv = w.cv;
+      if (cv && cv.Mat) resolve(cv);
+      else if (cv) cv.onRuntimeInitialized = () => resolve(w.cv);
+      else reject(new Error("opencv load failed"));
+    };
+    script.onerror = () => reject(new Error("opencv fetch failed"));
+    document.head.appendChild(script);
+  });
+  return cvReady;
+}
+
+/**
+ * AI結果を初期マスク、ブラシ線を確定前景/背景の制約として GrabCut を実行し、
+ * 透過済みの結果キャンバスを返す。
+ */
+async function grabCutRefine(
+  original: ImageBitmap,
+  prior: HTMLCanvasElement,
+  scribble: HTMLCanvasElement,
+): Promise<HTMLCanvasElement> {
+  const cv = await loadOpenCV();
+  setEditorBusy(true, t("reprocessing"));
+  // UIへ反映する猶予
+  await new Promise((r) => setTimeout(r, 16));
+
+  const fullW = original.width;
+  const fullH = original.height;
+  const maxDim = 900; // 処理は縮小して高速化、マスクは後で拡大
+  const scale = Math.min(1, maxDim / Math.max(fullW, fullH));
+  const w = Math.max(1, Math.round(fullW * scale));
+  const h = Math.max(1, Math.round(fullH * scale));
+
+  const tmp = document.createElement("canvas");
+  tmp.width = w;
+  tmp.height = h;
+  const tctx = tmp.getContext("2d")!;
+
+  tctx.clearRect(0, 0, w, h);
+  tctx.drawImage(original, 0, 0, w, h);
+  const imgData = tctx.getImageData(0, 0, w, h);
+
+  tctx.clearRect(0, 0, w, h);
+  tctx.drawImage(prior, 0, 0, w, h);
+  const priorData = tctx.getImageData(0, 0, w, h).data;
+
+  tctx.clearRect(0, 0, w, h);
+  tctx.drawImage(scribble, 0, 0, w, h);
+  const scrData = tctx.getImageData(0, 0, w, h).data;
+
+  const src = cv.matFromImageData(imgData);
+  const rgb = new cv.Mat();
+  cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+
+  const mask = new cv.Mat(h, w, cv.CV_8UC1);
+  for (let i = 0; i < w * h; i++) {
+    const a = priorData[i * 4 + 3];
+    let v = a > 128 ? cv.GC_PR_FGD : cv.GC_PR_BGD;
+    const r = scrData[i * 4];
+    const g = scrData[i * 4 + 1];
+    const sa = scrData[i * 4 + 3];
+    if (sa > 40) {
+      if (g > 120 && r < 110) v = cv.GC_FGD; // 緑=確定前景
+      else if (r > 120 && g < 110) v = cv.GC_BGD; // 赤=確定背景
+    }
+    mask.data[i] = v;
+  }
+
+  const bgd = new cv.Mat();
+  const fgd = new cv.Mat();
+  const rect = new cv.Rect(0, 0, w, h);
+  cv.grabCut(rgb, mask, rect, bgd, fgd, 3, cv.GC_INIT_WITH_MASK);
+
+  const alpha = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const m = mask.data[i];
+    const fg = m === cv.GC_FGD || m === cv.GC_PR_FGD;
+    alpha[i * 4] = 255;
+    alpha[i * 4 + 1] = 255;
+    alpha[i * 4 + 2] = 255;
+    alpha[i * 4 + 3] = fg ? 255 : 0;
+  }
+  src.delete();
+  rgb.delete();
+  mask.delete();
+  bgd.delete();
+  fgd.delete();
+
+  const maskSmall = document.createElement("canvas");
+  maskSmall.width = w;
+  maskSmall.height = h;
+  maskSmall.getContext("2d")!.putImageData(new ImageData(alpha, w, h), 0, 0);
+
+  // 元解像度で合成（マスクは滑らかに拡大）
+  const out = document.createElement("canvas");
+  out.width = fullW;
+  out.height = fullH;
+  const octx = out.getContext("2d")!;
+  octx.imageSmoothingEnabled = true;
+  octx.drawImage(original, 0, 0, fullW, fullH);
+  octx.globalCompositeOperation = "destination-in";
+  octx.drawImage(maskSmall, 0, 0, fullW, fullH);
+  octx.globalCompositeOperation = "source-over";
+  return out;
+}
 
 // 初期翻訳適用
 applyStaticTranslations();
